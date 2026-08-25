@@ -1,1 +1,87 @@
+name: Build & Release Debug APK
 
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Verify Java Environment
+        run: |
+          echo "JAVA_HOME is $JAVA_HOME"
+          java -version
+
+      - name: Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+
+      - name: Ensure Debug Keystore Exists
+        run: |
+          if [ ! -f "./debug.keystore" ]; then
+            echo "Generating debug.keystore..."
+            keytool -genkey -v -keystore ./debug.keystore \
+              -storepass android -alias androiddebugkey -keypass android \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          else
+            echo "debug.keystore already exists."
+          fi
+
+      - name: Build Debug APK
+        run: gradle :app:assembleDebug --stacktrace --no-daemon
+
+      - name: Verify & Prepare APK Artifact
+        id: prepare-apk
+        run: |
+          APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
+          if [ ! -f "$APK_PATH" ]; then
+            echo "ERROR: APK not found at $APK_PATH"
+            echo "Listing files in app/build/outputs/apk:"
+            find app/build/outputs/apk -type f || true
+            exit 1
+          fi
+          echo "APK successfully built at $APK_PATH"
+          
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          RELEASE_APK_NAME="${REPO_NAME}-debug-build-${{ github.run_number }}.apk"
+          cp "$APK_PATH" "$RELEASE_APK_NAME"
+          echo "release_apk_name=$RELEASE_APK_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        continue-on-error: true
+        with:
+          tag_name: debug-apk-build-${{ github.run_number }}-${{ github.run_attempt }}
+          name: "Debug APK Build #${{ github.run_number }}"
+          body: "Automated debug APK build from commit ${{ github.sha }}."
+          files: ${{ steps.prepare-apk.outputs.release_apk_name }}
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
